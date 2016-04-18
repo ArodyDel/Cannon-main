@@ -6,14 +6,18 @@
 #define D5  34	// Data pins for J204A
 #define D6  32
 #define D7  30
-#define AUP  2	// Angle up pin. Left joystick
-#define ADW  3	// Angle down pin. Left joystick
+#define AUP  27	// Angle up pin. Left joystick
+#define ADW  29	// Angle down pin. Left joystick
 #define PUP	 18	// Pressure up pin. Right joystick
 #define PDW	 19	// Pressure down pin. Right joystick
 #define ARM  20	// Arm/Disarm toggle switch pin
 #define FIR  21	// Fire pin. BIG RED BUTTON
 
-	
+#define MAX_ANGLE 80
+#define MIN_ANGLE 10
+#define MAX_PRESSURE 50
+#define MIN_PRESSURE 10
+
 int ignoreFlag = 0;					// flag is set if the cannon is locked. Ignore all interrupt input.
 int angleLow = 0;					// flags to ignore input on conditions.
 int angleHigh = 0;
@@ -24,9 +28,7 @@ int safe = 1;						// mode of the cannon for now only 1 or 0
 int angle = -1;						// cannon angle. Initialized to -1 so it doesn't display at the start.
 int pressure = -1;					// cannon pressure. Same as above.
 char* command;						// pointer to the string we will get over serial and interpreted as a command
-long debouncing_time = 150;			// I think it's in milisec. If interrupt is triggering more than once increase this value
-volatile unsigned long last_micros_aup = 1;	// Used to store the previous time an interrupt was triggered used for debouncing
-volatile unsigned long last_micros_adw = 1;
+long debouncing_time = 100;			// I think it's in milisec. If interrupt is triggering more than once increase this value
 volatile unsigned long last_micros = 1;
 
 LiquidCrystal lcd(RS, E, D4, D5, D6, D7);		// Creates an lcd object so that we can use the LiquidCrystal library
@@ -34,7 +36,9 @@ LiquidCrystal lcd(RS, E, D4, D5, D6, D7);		// Creates an lcd object so that we c
 void setup() 
 {
   pinMode(13, OUTPUT);
+  pinMode(25, OUTPUT);
   digitalWrite(13, HIGH);
+  digitalWrite(25, HIGH);
   lcd.begin(20, 4);                         // 20, 4 is our lcd size
 	displayMenu();														// Initialize the lcd to display the Menu without values
 	pinMode(AUP, INPUT_PULLUP);											// Making the interrupt pin INPUT_PULLUP makes it less sensitive to noise, but switches the logic. 
@@ -45,59 +49,43 @@ void setup()
 	pinMode(FIR, INPUT_PULLUP);											// Making the interrupt pin INPUT_PULLUP makes it less sensitive to noise, but switches the logic.
 	Serial.begin(9600);
 	Serial.print("f30");												// Fire code for ready.
-  Serial2.begin(9600);
+  Serial2.begin(14400);
 	}
 
 void loop() 
 {
 	if(CannonReadyFlag)                      // Wait until the cannon is ready for input to enable all input interrupts.
   {
-    attachInterrupt(digitalPinToInterrupt(AUP), aUpDebounce, LOW); // use of digitalPinToInterrupt is safer. debounce is the name of the function called when triggered.
-    attachInterrupt(digitalPinToInterrupt(ADW), aDwDebounce, LOW);
-    attachInterrupt(digitalPinToInterrupt(PUP), pUpDebounce, RISING);
-    attachInterrupt(digitalPinToInterrupt(PDW), pDwDebounce, RISING);
+    noInterrupts();           // disable all interrupts
+    TCCR1A = 0;               //timer1 setup
+    TCCR1B = 0;
+    TCNT1  = 0;               // Reset the count in the timer
+
+    OCR1A = 12500;            // compare match register I'm not sure exactly how much that value ammounts to but it is roughly 200-250 milisec
+    TCCR1B |= (1 << WGM12);   // Clear Timer Count on interrupt mode
+    TCCR1B |= (1 << CS12);    // 256 prescaler means that the timer wil tick 256 times slower than the clock speed
+    TIMSK1 |= (1 << OCIE1A);  // enable timer compare interrupt
+    interrupts();
+ 
     attachInterrupt(digitalPinToInterrupt(ARM), armDebounce, RISING);
     attachInterrupt(digitalPinToInterrupt(FIR), fireDebounce, RISING);
+    CannonReadyFlag = 0;
   }
 }
 
+ISR(TIMER1_COMPA_vect)          // timer compare interrupt service routine
+{
+  if(!digitalRead(AUP))
+    angleUp();
+  if(!digitalRead(ADW))
+    angleDown();
+  if(!digitalRead(PUP))
+    pressureUp();
+  if(!digitalRead(PDW))
+    pressureDown();
+}
 // It's the debouncing functionw that are called during interrupt. It simply buffers up the interrupts only allowing once interrupt every debouncing_time milisec
 // It calls the actual Interrupt service routine only after the debouncing.
-void aUpDebounce()
-{
-  last_micros_aup++;
-	if(last_micros_aup%3500 == 0)
-	{
-		angleUp();
-	}
-}
-
-void aDwDebounce()
-{
-  last_micros_adw++;
-	if(last_micros_adw%3500 == 0)
-	{
-		angleDown();
-	}
-}
-
-void pUpDebounce()
-{
-	if((long)(micros() - last_micros) >= debouncing_time*1000)
-	{
-		pressureUp();
-		last_micros = micros();
-	}
-}
-
-void pDwDebounce()
-{
-	if((long)(micros() - last_micros) >= debouncing_time*1000)
-	{
-		pressureDown();
-		last_micros = micros();
-	}
-}
 
 void armDebounce()
 {
@@ -110,7 +98,7 @@ void armDebounce()
 
 void fireDebounce()
 {
-	if((long)(micros() - last_micros) >= debouncing_time*1000)
+	if((long)(micros() - last_micros) >= debouncing_time*4000)
 	{
 		fire();
 		last_micros = micros();
@@ -120,66 +108,75 @@ void fireDebounce()
 // The ISRs (Interrupt Service Routine).
 void angleUp()
 {	
-	if(!angleHigh)
+  if(!safe)
+    return;
+	if(angle < MAX_ANGLE)
 	{
-		Serial2.print("aup");
-    Serial.print("aup");
+    Serial.print("ainz");
+    Serial2.print("ainz");
     angle++;
     updateMenu();
 	}
-	angleLow = 0;
 }
 
 void angleDown()
 {	
-	if(!angleLow)
+  if(!safe)
+    return;
+	if(angle > MIN_ANGLE)
 	{
-		Serial2.print("adw");
-    Serial.print("adw");
+    Serial.print("adwz");
+    Serial2.print("adwz");
     angle--;
     updateMenu();
 	}
-	angleHigh = 0;
 }
 
 void pressureUp()
 {	
-	if(!pressureHigh)
+  if(!safe)
+    return;
+	if(pressure < MAX_PRESSURE)
 	{
-		Serial.print("pup");
+		Serial.print("pinz");
+    Serial2.print("pinz");
     pressure++;
     updateMenu();
   }
-	pressureLow = 0;
 }
 
 void pressureDown()
 {	
-	if(!pressureLow)
+  if(!safe)
+    return;
+	if(pressure > MIN_PRESSURE)
 	{
-		Serial.print("pdw");
+	  Serial.print("pdwz");
+    Serial2.print("pdwz");
 	  pressure--;
     updateMenu();
 	}
-	pressureHigh = 0;
 }
 
 //These two will be heavily modified. I don't know exactly how we will do this yet.
 void arm()
 {	
-	Serial.print("arm");
-	if(safe == 0)
-		safe = 1;
-	else
-		safe = 0;
+	Serial.print("f10z");
+	Serial2.print("f10z");
+	safe = !safe;
+  digitalWrite(25, safe);
   updateMenu();
 	//do extra things here like switching ignore flags, etc.
 }
 
 void fire()
 {	
-	Serial.print("fir");
-	safe = 1;		//I think.
+  if(!safe)
+  {
+    Serial.print("f20z");
+    Serial2.print("f20z");
+  }
+//	safe = 1;		//I think.
 	// Might want to just impremment an arm/disarm function that takes care of flags
 }
 
@@ -188,9 +185,9 @@ void serialEvent()
 {
 	char buf[512] = "";					// Set up a small buffer for readBytes
   
-	while(Serial.available() < 3);		// Poll until we have 3 characters(1 command)
+	while(Serial.available() < 4);		// Poll until we have 3 characters(1 command)
 
-	Serial.readBytes(buf, 3);			// Read the command
+	Serial.readBytes(buf, 4);			// Read the command
 
 	command = buf;						
 
@@ -216,9 +213,12 @@ void serialEvent()
 		{
 			switch(command[1])
 			{
-				case '0':			// General Error. Something happened to the cannon and it blocked all input.
+				case '0':			// Error State
 				{
-					ignoreFlag = 1;
+//					switch(command[2]
+//					{
+            
+//					}
 					break;
 				}
 				case '1':			// Angle Error.
@@ -258,6 +258,11 @@ void serialEvent()
 					CannonReadyFlag = 1;
 					break;
 				}
+        case '4':     // Flip Cannon State
+        {
+          arm();
+          break;
+        }
 			}
 			break;
 		}
@@ -274,6 +279,8 @@ void displayMenu()
 	lcd.clear();
 	lcd.setCursor(0, 0);			// Sets the lcd cursor to 1st line beggining
 	lcd.print("Cannon state:");
+  lcd.setCursor(15, 0);
+  lcd.print(String( (safe)?" SAFE":"ARMED"));     //Depending on the state variable choose between the 2 strings around the : character
 	lcd.setCursor(0, 1);			// 2nd line beginning and etc.
 	lcd.print("Angle:");
 	lcd.setCursor(0, 2);
