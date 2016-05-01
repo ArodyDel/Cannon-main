@@ -4,296 +4,275 @@
 EasyTransfer ETin;
 EasyTransfer ETout;
 
+  //Receive data for EasyTransfer
 struct RECEIVE_DATA_STRUCTURE{
-  char chardata[4];
+    char chardata[4];
 };
 
+  //Send data for EasyTransfer
 struct SEND_DATA_STRUCTURE{
-  char chardata[4];
+    char chardata[4];
 };
 
 SEND_DATA_STRUCTURE dataReceive;
 RECEIVE_DATA_STRUCTURE dataSend;
 
-// Angle control Related
-#define aFF2 51
-#define aFF1 53
-#define aPWM 12
-#define aDIR 31
-#define aPOS A0
+  // Actuator related pins
+#define aFF2 6
+#define aFF1 7
+#define aPWM 8
+#define aDIR 9
+#define aPOS A8
 
-// Pressure control Related
-#define relayPower 52
-#define fireRelay 17
-#define blowoffRelay 20
-#define inflatorRelay 21
+  // Relay control pins
+#define inflatorRelay 5
+#define fireRelay 4
+#define blowoffRelay 3
 
-// Sensor
-#define angleSen A1
-#define pressureSen A2
-#define proxSen A3
+  // Sensor pins
+#define pressureSen A9
+#define proxSen A0
 
-// Actuator
+  // Actuator constants
 const int MIN_ANGLE = 10;
 const int MAX_ANGLE = 80;
 const int MIN_ANGLE_READING = 60;
-const int MAX_ANGLE_READING = 940;
-const double TOTAL_LENGTH = 3.93 * 25.4;  // in millimeter
+const int MAX_ANGLE_READING = 950;
+const double TOTAL_LENGTH = 3.93 * 25.4;
 const double LENGTH_PER_READING = TOTAL_LENGTH / (MAX_ANGLE_READING - MIN_ANGLE_READING);
 const double ANGLE_INTERVAL = MAX_ANGLE - MIN_ANGLE;
 
-//Transducer
-const int MIN_PSI = 0;
-const int MAX_PSI = 50;
+  // Transducer constants
 const double MIN_PSI_READING = 200.0;
 const double MAX_PSI_READING = 400.0;
 const double PSI_READING_INTERVAL = MAX_PSI_READING - MIN_PSI_READING;
-const double PSI_INTERVAL = MAX_PSI - MIN_PSI;
+const double PSI_INTERVAL = 50.0;
 
 int angle;
-int psi;
-bool safe;
-bool armed;
 int aDirection;
-char* command;
-char* com;
+bool set_angle;
+
+bool armed;
+bool safe;
+bool previousSafe;
+bool isNoPower;
 
 
 void setup(){
-  pinMode(aFF2, INPUT);      
-  pinMode(aFF1, INPUT);
-  pinMode(aPWM, OUTPUT);
-  pinMode(aDIR, OUTPUT);
-  pinMode(aPOS, INPUT);
-  pinMode(relayPower, OUTPUT);
-  pinMode(fireRelay, OUTPUT);
-  pinMode(blowoffRelay, OUTPUT);
-  pinMode(inflatorRelay, OUTPUT);
-  pinMode(angleSen, INPUT);
-  pinMode(pressureSen, INPUT);
-  pinMode(proxSen, INPUT);
-
-  Serial.begin(9600);
-  Serial1.begin(9600);
-  ETin.begin(details(dataReceive), &Serial1);
-  ETout.begin(details(dataSend), &Serial1);
-  aDirection = 0;
-  armed = false;
-     
-  // Angle initialization
-  digitalWrite(aDIR, 1);
-  analogWrite(aPWM, 255);
-  while(analogRead(aPOS) <= MAX_ANGLE_READING){ Serial.println(digitalRead(aFF1)); Serial.println(digitalRead(aFF2)); Serial.println(analogRead(aPOS)); delay(1000);}
-  analogWrite(aPWM, 0);
-  digitalWrite(aDIR, aDirection);
-  angle = MIN_ANGLE;
-  sendCommand("a" + String(angle));
-
-  digitalWrite(relayPower, 1);
-  // Pressure initialization
-  digitalWrite(fireRelay, 1);
-  digitalWrite(inflatorRelay, 1);
-  digitalWrite(blowoffRelay, 1);
-  //pressureOperation(5);
-
-  Serial.println("ANGLE: " + String(angle));
-  Serial.println("PRESSURE: " + String(getPsi()));
-  Serial.println("PROXIMITY: " + String(getProximitySensor()));
-  Serial.println();
-
-}
+    pinMode(aFF2, INPUT);      
+    pinMode(aFF1, INPUT);
+    pinMode(aPWM, OUTPUT);
+    pinMode(aDIR, OUTPUT);
+    pinMode(aPOS, INPUT);
+    pinMode(fireRelay,OUTPUT);
+    pinMode(blowoffRelay, OUTPUT);
+    pinMode(inflatorRelay, OUTPUT);
+    pinMode(pressureSen, INPUT);
+    pinMode(proxSen, INPUT);
   
+    Serial.begin(9600);
+    Serial1.begin(9600);
+    ETin.begin(details(dataReceive), &Serial1);                      // Using Serial 1 for easy transfer
+    ETout.begin(details(dataSend), &Serial1);
+    
+    aDirection = 0;                                                   // Initialize actactor direction to 0 (retract)
+    armed = false;                                                    // Initialize arm flag
+    isNoPower = false;                                                // Initialize power flag
+    previousSafe = true;                                              // Initialize safe flag
+    set_angle = false;                                                // Initialize set_angle flag
+  
+      // Relay initialization
+    digitalWrite(fireRelay, 1);                                       // Turn off all relays
+    digitalWrite(inflatorRelay, 1);
+    digitalWrite(blowoffRelay, 1);
+    
+      // Setup timer1 interrupt
+    noInterrupts();
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    OCR1A = 0;
+  
+    OCR1A = 65500;                                                    // Control timer time with 65536 being the maximum
+    TCCR1B |= (1 << WGM12);
+    TCCR1B |= (1 << CS12);
+    TIMSK1 |= (1 << OCIE1A);
+    interrupts();
+       
+      // Angle initialization
+    digitalWrite(aDIR, 1);                                            // Initialize cannon to 10 degree
+    analogWrite(aPWM, 255);
+    angle = MIN_ANGLE;
+    while(abs(analogRead(aPOS) - MAX_ANGLE_READING) > 1) {
+      angleOperation();
+    }
+    analogWrite(aPWM, 0);
+    digitalWrite(aDIR, aDirection);
+
+    sendCommand("a" + String(angle));                                  // Send angle and pressure status to control box
+    sendCommand("p" + String((int)round(getPsi())));
+}
+
 
 void loop(){
-  serialProcess();
-  angleOperation();
-  // Check pressure/ proximity sensors/ deadman switch
-  safe = true;  
-
-//  psi = getPsi();
-//  safe &= (psi <= 50);
-//  if(!safe){
-//    while(getPsi() > 50.0){
-//      digitalWrite(blowoffRelay, 1);
-//    }
-//  }
-//  safe &= (getProximitySensor() < 30);
-}
-
-void serialEvent(){
-  if(Serial.available()){
-    char buf[24] = "";
-    Serial.readBytes(buf, 1);
-    switch(buf[0]){
-      case '1':
-        digitalWrite(fireRelay, 0);
-        Serial.println(buf[0]);
-        break;
-      case '2':
-        digitalWrite(fireRelay, 1);
-        Serial.println(buf[0]);
-        break;
-      case '3':
-        digitalWrite(blowoffRelay, 0);
-        Serial.println(buf[0]);
-        break;
-      case '4':
-        digitalWrite(blowoffRelay, 1);
-        Serial.println(buf[0]);
-        break;
-      case '5':
-        digitalWrite(inflatorRelay, 0);
-        Serial.println(buf[0]);
-        break;
-      case '6':
-        digitalWrite(inflatorRelay, 1);
-        Serial.println(buf[0]);
-        break;
-    }
-  }
-}
-
-void serialProcess(){
-  if(ETin.receiveData()){
-    Serial.println(String(dataReceive.chardata));
+    serialProcess();                                                   // Check serial communication
     
-    if(safe){
-      switch(dataReceive.chardata[0]){
-        // Angle
-        case 'a':{
-//          if(dataReceive.chardata[1] == 'i' && dataReceive.chardata[2] == 'n' && angle < MAX_ANGLE && !armed){
-//            angleOperation(++angle);
-//          } else if(dataReceive.chardata[1] == 'd' && dataReceive.chardata[2] == 'w' && angle > MIN_ANGLE && !armed){
-//            angleOperation(--angle);
-//          } else {
-//            // Error
-//          }
-            int temp = (dataReceive.chardata[1] - 0x30) * 10 + (dataReceive.chardata[2] - 0x30);
-            angle = temp;
-            //angleOperation(angle);
-          break;
-        }
-          
-        // Pressure
-        case 'p':{
-          int psi = getPsi();
-          if(dataReceive.chardata[1] == 'i' && dataReceive.chardata[2] == 'n' && psi < MAX_PSI && !armed){
-            //pressureOperation(++psi);
-              digitalWrite(blowoffRelay, 0);
-          } else if(dataReceive.chardata[1] == 'd' && dataReceive.chardata[2] == 'w' && psi > MIN_PSI && !armed){
-            //pressureOperation(--psi);
-              digitalWrite(blowoffRelay, 1);
-          } else {
-            // Error
-          }
-          break;
-       }
-
-        // Fire code
-        case 'f':{
-          Serial.println("Fire code");
-          if(dataReceive.chardata[1] == '3' && dataReceive.chardata[2] == '0'){
-            sendCommand("a" + String(angle));
-            sendCommand("p" + String((int)getPsi()));
-            sendCommand("f30");
-          } else if(dataReceive.chardata[1] == '2' && dataReceive.chardata[2] == '0' && armed){ 
-            digitalWrite(fireRelay, 0);
-            delay(2000);
-            digitalWrite(fireRelay, 1);
-          } else if(dataReceive.chardata[1] == '1' && dataReceive.chardata[2] == '0'){
-            armed = !armed;
-          } else {
-            // Error
-          }
-          break;
-        }
-      }
-    } else {
-      Serial.println("Not Safe!");
+    if(set_angle){                                                     // Adjust connan angle if set_angle flag is set
+        angleOperation();
+    }    
+                                                                       // Check the safety status (pressure and proximity) of the connan
+    if(getPsi() >= 51.0){                                              // Turn off blowoff solenoid and inflator when pressure reaches 51 psi until it is back to 45 psi
+        digitalWrite(blowoffRelay, 1);
+        digitalWrite(inflatorRelay, 1);
+        while(getPsi() > 45.0);
+        digitalWrite(blowoffRelay, 0);
     }
+    safe = (getProximitySensor() < 50.0);
+    
+    if(!safe && previousSafe){                                         // Safe -> Not safe: Send signal to control box and turn off inflator
+        sendCommand("f01");
+        digitalWrite(inflatorRelay, 1);
+    } else if(!previousSafe && safe){                                  // Not safe -> Safe: Send signal to control box
+        sendCommand("f02");
+    }
+    previousSafe = safe;                                               // Save the current safety status
+}
 
-    Serial.println("ANGLE: " + String(angle));
+
+  // Timer 1 event
+ISR(TIMER1_COMPA_vect){
+    Serial.println("ANGLE: " + String(angle));                        // Display values to serial monitor
     Serial.println("PRESSURE: " + String(getPsi()));
     Serial.println("PROXIMITY: " + String(getProximitySensor()));
     Serial.println();
-  }
-}
-
-
-void angleOperation(){
-  int requiredReading = angleToReading(angle);
-  int reading = analogRead(aPOS);
-  if(abs(reading - requiredReading) > 2){
-    aDirection = (reading - requiredReading) < 0 ? 1 : 0;
-    digitalWrite(aDIR, aDirection);
-    analogWrite(aPWM, 100);
-    reading = analogRead(aPOS);
-    //Serial.print("Require: ");
-    //Serial.println(requiredReading);
-    //Serial.print("Read: ");
-    //Serial.println(analogRead(aPOS));
-  } else {
-    //sendCommand("a" + String(angle));
-    analogWrite(aPWM, 0);
-  }
-}
-
-int angleToReading(int angle){
-  if(angle <= MIN_ANGLE){ return MAX_ANGLE_READING; }
-  if(angle >= MAX_ANGLE){ return MIN_ANGLE_READING; }
-  double length = ((angle - MIN_ANGLE) / ANGLE_INTERVAL) * TOTAL_LENGTH;
-  return (int) MAX_ANGLE_READING - (length / LENGTH_PER_READING);
-}
-
-double getAngle(){
-   double reading = analogRead(angleSen);
-   double temp = reading / 1023.0;
-   return temp * 300;
-}
-
-
-void pressureOperation(int psi){
-  int requiredReading = psiToReading(psi);
-  int reading = analogRead(pressureSen);
-  while(abs(reading - requiredReading) > 3){
-    if(reading - requiredReading > 0){
-      digitalWrite(blowoffRelay, 0);
-      digitalWrite(inflatorRelay, 1);
-    } else {
-      digitalWrite(inflatorRelay, 0);
-      digitalWrite(blowoffRelay, 1);
+    
+    if(previousSafe){                                                  // Continually send pressure value to control box if it is under safe mode
+        if(isNoPower && getPsi() > 0){                                 // No power -> Power: Send signal to control box and reset POWER flag
+            sendCommand("f03");
+            isNoPower = false;
+        }
+        sendCommand("p" + String((int)round(getPsi())));
     }
-  }
-  sendCommand("p" + String(psi));
-  digitalWrite(blowoffRelay, 1);
-  digitalWrite(inflatorRelay, 1);
 }
+
+
+  // Process message from control box
+void serialProcess(){
+    if(ETin.receiveData()){
+        Serial.println(String(dataReceive.chardata));
+      
+        switch(dataReceive.chardata[0]){
+              // Angle
+            case 'a':
+                if(!armed){
+                    angle = (dataReceive.chardata[1] - 0x30) * 10 + (dataReceive.chardata[2] - 0x30);             // Set angle and set_angle flag
+                    set_angle = true;
+                }
+                break;
+
+              // Pressure
+            case 'p':
+                if(dataReceive.chardata[1] == 'u' && dataReceive.chardata[2] == 'h' && !armed){
+                    digitalWrite(inflatorRelay, 0);                                                               // Turn on inflator and blowoff solenoid (Increasing pressure)
+                    digitalWrite(blowoffRelay, 0);
+                } else if(dataReceive.chardata[1] == 'd' && dataReceive.chardata[2] == 'h' && !armed){
+                    digitalWrite(inflatorRelay, 1);                                                               // Turn off inflator and blowoff solenoid (Decreasing pressure)
+                    digitalWrite(blowoffRelay, 1);
+                } else if(dataReceive.chardata[2] == 'r' && !armed){
+                    digitalWrite(inflatorRelay, 1);                                                               // Turn off inflator and turn on blowoff solenoid (Stay)
+                    digitalWrite(blowoffRelay, 0);
+                }
+                break;
+  
+              // Fire code
+            case 'f':
+                if(dataReceive.chardata[1] == '3' && dataReceive.chardata[2] == '0'){
+                    sendCommand("a" + String(angle));                                                             // Return angle, pressure and safety status to control box
+                    sendCommand("p" + String((int)round(getPsi())));
+                    sendCommand("f30");
+                    if(!previousSafe){ 
+                        sendCommand("f01"); 
+                    }
+                } else if(dataReceive.chardata[1] == '2' && dataReceive.chardata[2] == '0' && armed){   
+                    digitalWrite(fireRelay, 0);                                                                   // Turn on the firing solenoid for 2 second and turn off inflator (Firing)
+                    digitalWrite(inflatorRelay, 1);
+                    delay(2000);
+                    digitalWrite(fireRelay, 1);
+                } else if(dataReceive.chardata[1] == '1' && dataReceive.chardata[2] == '0'){
+                    armed = !armed;                                                                               // Arm and disarm the connan
+                }
+                break;
+        }
+        
+    }
+}
+
+  
+void angleOperation(){
+    int requiredReading = angleToReading(angle);
+    int reading = analogRead(aPOS);
+    if(abs(reading - requiredReading) > 1){                                        // If not yet reach the target angle, activate the actuator
+        aDirection = (reading - requiredReading) < 0 ? 1 : 0;                      // in the direction toward the target
+        digitalWrite(aDIR, aDirection);
+        analogWrite(aPWM, 100);
+    } else {
+        analogWrite(aPWM, 0);                                                     // If reach target, stop actuator and reset set_angle flag
+        set_angle = false;
+    }
+}
+
+
+  // Convert angle to the reading of actuator
+int angleToReading(int angle){
+    if(angle <= MIN_ANGLE){ return MAX_ANGLE_READING; }
+    if(angle >= MAX_ANGLE){ return MIN_ANGLE_READING; }
+    
+    double length = ((angle - MIN_ANGLE) / ANGLE_INTERVAL) * TOTAL_LENGTH;
+    return (int) round(MAX_ANGLE_READING - (length / LENGTH_PER_READING));
+}
+
 
 double getPsi(){
-  double reading = analogRead(pressureSen);
-  if(reading < MIN_PSI_READING){ return -1; }
-  double length = (reading - MIN_PSI_READING) / PSI_READING_INTERVAL;
-  return length * PSI_INTERVAL;
+    double reading = 0;                                                           // Get 30 readings from the tranducer and take the average as the final reading
+    for(int i = 0; i < 30; i++){
+        reading += analogRead(pressureSen);
+    }
+    reading /= 30.0;
+    
+    if(reading <= MIN_PSI_READING){                                                 
+        if(reading < MIN_PSI_READING - 5){                                        // Determine if there is no power to the transducer
+            isNoPower = true; 
+            return -1; 
+        }
+        return 0;
+    }
+    
+    return (reading - MIN_PSI_READING) * PSI_INTERVAL / PSI_READING_INTERVAL;
 }
 
-int psiToReading(int psi){
-  if(psi <= MIN_PSI){ return MIN_PSI_READING; }
-  if(psi >= MAX_PSI){ return MAX_PSI_READING; }
-  double length = (psi / PSI_INTERVAL) * PSI_READING_INTERVAL;
-  return (int) length + MIN_PSI_READING;
-}
 
 double getProximitySensor(){
-  return analogRead(proxSen);
+    double reading = 0;                                                           // Get 50 readings from the sensors and take the average as the final reading
+    for(int i = 0; i < 50; i++){
+        reading += analogRead(proxSen);
+    }
+    return reading /= 50.0;
 }
 
 
-void sendCommand(String command){
-  dataSend.chardata[0] = command[0];
-  dataSend.chardata[1] = command[1];
-  dataSend.chardata[2] = command[2];
-  dataSend.chardata[3] = 0;
-  ETout.sendData();
+void sendCommand(String command){                                                 // Send 4-character command to control box using east transfer
+    if(command[0] == 'p' && command.length() < 3){
+        dataSend.chardata[0] = command[0];
+        dataSend.chardata[1] = '0';
+        dataSend.chardata[2] = command[1];
+        dataSend.chardata[3] = 0;
+    } else {
+        dataSend.chardata[0] = command[0];
+        dataSend.chardata[1] = command[1];
+        dataSend.chardata[2] = command[2];
+        dataSend.chardata[3] = 0;
+    }
+    ETout.sendData();
 }
 
 
