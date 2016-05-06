@@ -33,14 +33,9 @@ RECEIVE_DATA_STRUCTURE dataSend;
 #define pressureSen A9
 #define proxSen A0
 
-  // Actuator constants
+  // Angle constants
 const int MIN_ANGLE = 10;
 const int MAX_ANGLE = 80;
-const int MIN_ANGLE_READING = 60;
-const int MAX_ANGLE_READING = 950;
-const double TOTAL_LENGTH = 3.93 * 25.4;
-const double LENGTH_PER_READING = TOTAL_LENGTH / (MAX_ANGLE_READING - MIN_ANGLE_READING);
-const double ANGLE_INTERVAL = MAX_ANGLE - MIN_ANGLE;
 
   // Transducer constants
 const double MIN_PSI_READING = 200.0;
@@ -93,7 +88,7 @@ void setup(){
     TCNT1 = 0;
     OCR1A = 0;
   
-    OCR1A = 65500;                                                    // Control timer time with 65536 being the maximum
+    OCR1A = 65500;                                                    // Control timer time with 65536 being the maximum value (slowest)
     TCCR1B |= (1 << WGM12);
     TCCR1B |= (1 << CS12);
     TIMSK1 |= (1 << OCIE1A);
@@ -103,7 +98,7 @@ void setup(){
     digitalWrite(aDIR, 1);                                            // Initialize cannon to 10 degree
     analogWrite(aPWM, 255);
     angle = MIN_ANGLE;
-    while(abs(analogRead(aPOS) - MAX_ANGLE_READING) > 1) {
+    while(abs(analogRead(aPOS) - angleToReading(10)) > 1) {
       angleOperation();
     }
     analogWrite(aPWM, 0);
@@ -120,14 +115,14 @@ void loop(){
     if(set_angle){                                                     // Adjust connan angle if set_angle flag is set
         angleOperation();
     }    
-                                                                       // Check the safety status (pressure and proximity) of the connan
+                                                                       
     if(getPsi() >= 51.0){                                              // Turn off blowoff solenoid and inflator when pressure reaches 51 psi until it is back to 45 psi
         digitalWrite(blowoffRelay, 1);
         digitalWrite(inflatorRelay, 1);
         while(getPsi() > 45.0);
         digitalWrite(blowoffRelay, 0);
     }
-    safe = (getProximitySensor() < 50.0);
+    safe = (getProximitySensorReading() < 50.0);                              // Check the proximity sensor
     
     if(!safe && previousSafe){                                         // Safe -> Not safe: Send signal to control box and turn off inflator
         sendCommand("f01");
@@ -143,11 +138,11 @@ void loop(){
 ISR(TIMER1_COMPA_vect){
     Serial.println("ANGLE: " + String(angle));                        // Display values to serial monitor
     Serial.println("PRESSURE: " + String(getPsi()));
-    Serial.println("PROXIMITY: " + String(getProximitySensor()));
+    Serial.println("PROXIMITY: " + String(getProximitySensorReading()));
     Serial.println();
     
     if(previousSafe){                                                  // Continually send pressure value to control box if it is under safe mode
-        if(isNoPower && getPsi() > 0){                                 // No power -> Power: Send signal to control box and reset POWER flag
+        if(isNoPower && getPsi() >= 0){                                // No power -> Power: Send signal to control box and reset POWER flag
             sendCommand("f03");
             isNoPower = false;
         }
@@ -224,23 +219,27 @@ void angleOperation(){
 
   // Convert angle to the reading of actuator
 int angleToReading(int angle){
-    if(angle <= MIN_ANGLE){ return MAX_ANGLE_READING; }
-    if(angle >= MAX_ANGLE){ return MIN_ANGLE_READING; }
+    int ang = angle;
+    if(angle <= MIN_ANGLE){ 
+        ang = 10;
+    }
+    else if(angle >= MAX_ANGLE){ 
+        ang = 80;
+    }
     
-    double length = ((angle - MIN_ANGLE) / ANGLE_INTERVAL) * TOTAL_LENGTH;
-    return (int) round(MAX_ANGLE_READING - (length / LENGTH_PER_READING));
+    return (int) round(0.0005 * pow(ang, 3) - 0.0274 * pow(ang, 2) - 12.452 * ang + 961.19);      // Equation got from mapping the reading vs. angle
 }
 
 
 double getPsi(){
-    double reading = 0;                                                           // Get 30 readings from the tranducer and take the average as the final reading
-    for(int i = 0; i < 30; i++){
+    double reading = 0;                                                           // Get 50 readings from the tranducer and take the average as the final reading
+    for(int i = 0; i < 50; i++){
         reading += analogRead(pressureSen);
     }
-    reading /= 30.0;
+    reading /= 50.0;
     
     if(reading <= MIN_PSI_READING){                                                 
-        if(reading < MIN_PSI_READING - 5){                                        // Determine if there is no power to the transducer
+        if(reading < MIN_PSI_READING - 20){                                        // Determine if there is no power to the transducer
             isNoPower = true; 
             return -1; 
         }
@@ -251,16 +250,16 @@ double getPsi(){
 }
 
 
-double getProximitySensor(){
-    double reading = 0;                                                           // Get 50 readings from the sensors and take the average as the final reading
-    for(int i = 0; i < 50; i++){
+double getProximitySensorReading(){
+    double reading = 0;                                                           // Get 100 readings from the sensors and take the average as the final reading
+    for(int i = 0; i < 100; i++){
         reading += analogRead(proxSen);
     }
-    return reading /= 50.0;
+    return reading /= 100.0;
 }
 
 
-void sendCommand(String command){                                                 // Send 4-character command to control box using east transfer
+void sendCommand(String command){                                                 // Send 4-character command to control box using easy transfer
     if(command[0] == 'p' && command.length() < 3){
         dataSend.chardata[0] = command[0];
         dataSend.chardata[1] = '0';
