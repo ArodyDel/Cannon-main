@@ -77,9 +77,9 @@ void setup(){
     set_angle = false;                                                // Initialize set_angle flag
   
       // Relay initialization
-    digitalWrite(fireRelay, 1);                                       // Turn off all relays
+    digitalWrite(fireRelay, 1);                                       // Turn off all relays except the blow off
     digitalWrite(inflatorRelay, 1);
-    digitalWrite(blowoffRelay, 1);
+    digitalWrite(blowoffRelay, 0);
     
       // Setup timer1 interrupt
     noInterrupts();
