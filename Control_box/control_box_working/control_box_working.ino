@@ -14,11 +14,11 @@ struct RECEIVE_DATA_STRUCTURE{
 SEND_DATA_STRUCTURE dataSend;
 RECEIVE_DATA_STRUCTURE dataReceive;
 
-#define GND 40
+#define GND 40  // A pin set to LOW to act as gnd for the LCD display
 #define RS	24	// RS pin for J204A LCD display
 #define E  	22	// E pin for J204A LCD display
-#define D4  36	
-#define D5  34	// Data pins for J204A
+#define D4  36	// Data pins for J204A
+#define D5  34	
 #define D6  32
 #define D7  30
 #define LL  50  // LCD Backlight pin
@@ -32,20 +32,20 @@ RECEIVE_DATA_STRUCTURE dataReceive;
 
 #define MAX_ANGLE 80
 #define MIN_ANGLE 10
-#define MAX_PRESSURE 52
+#define MAX_PRESSURE 51
 #define MIN_PRESSURE -1
 
-
-int puheld = 0;
-int pdheld = 0;
-int joystickupheld = 0;
-int joystickdwheld = 0;
-int fired = 0;
+int nopow = 0;              // Flag for when the cannon is without power. It gets set when we recive "p-1"
+int puheld = 0;             // Pressure up held flag.
+int pdheld = 0;             // Pressure down held flag.
+int joystickupheld = 0;     // Angle up held flag.
+int joystickdwheld = 0;     // Angle down held flag.
+int fired = 0;              // flag that gets set when you press the fire button. It's so that you can't fire twice without disarming the cannon first.
 int ignoreFlag = 0;					// flag is set if the cannon is locked. Ignore all interrupt input.
 int CannonReadyFlag = 0;			// Is the Cannon ready to accept commands
 int safe = 1;						// mode of the cannon for now only 1 or 0
-int angle = 10;						// cannon angle. Initialized to -1 so it doesn't display at the start.
-int pressure = 0;					// cannon pressure. Same as above.
+int angle = -1;						// cannon angle. Initialized to -1 so it doesn't display at the start.
+int pressure = -1;					// cannon pressure. Same as above.
 char* command;						// pointer to the string we will get over serial and interpreted as a command
 long debouncing_time = 100;			// I think it's in milisec. If interrupt is triggering more than once increase this value
 volatile unsigned long last_micros = 1;
@@ -62,9 +62,8 @@ void setup()
   digitalWrite(GND, LOW);
   digitalWrite(LL, HIGH);
   digitalWrite(BL, HIGH);
-  lcd.begin(20, 4);// 20, 4 is our lcd size
-	displayMenu();														// Initialize the lcd to display the Menu without values
-//  lcd.clear();
+  lcd.begin(20, 4);                               // 20, 4 is our lcd size
+	displayMenu();														      // Initialize the lcd to display the Menu without values
 	pinMode(AUP, INPUT_PULLUP);											// Making the interrupt pin INPUT_PULLUP makes it less sensitive to noise, but switches the logic. 
 	pinMode(ADW, INPUT_PULLUP);											// Making the interrupt pin INPUT_PULLUP makes it less sensitive to noise, but switches the logic.
 	pinMode(PUP, INPUT_PULLUP);											// Making the interrupt pin INPUT_PULLUP makes it less sensitive to noise, but switches the logic.
@@ -73,7 +72,7 @@ void setup()
 	pinMode(FIR, INPUT_PULLUP);											// Making the interrupt pin INPUT_PULLUP makes it less sensitive to noise, but switches the logic.
 	Serial.begin(9600);
   Serial2.begin(9600);                            // Direct EasyTransfer UART
-  Serial3.begin(9600);                            // BLIP RS232 UART
+  Serial3.begin(9600);                            // BLIP RS232 UART. Currently not used. I'll leave the code for it here for now.
   ETout.begin(details(dataSend), &Serial2);
   ETin.begin(details(dataReceive), &Serial2);
   dataSend.chardata[0] = 'f';
@@ -105,10 +104,7 @@ void loop()
   }
 
   if(ETin.receiveData())
-  {
-    Serial.print(String(dataReceive.chardata));
     handleCommand(dataReceive.chardata);
-  }
 }
 
 void serial3Event()
@@ -259,7 +255,7 @@ void displayMenu()
 	lcd.setCursor(8, 1);			// 2nd line beginning and etc.
 	lcd.print("PSI");
 	lcd.setCursor(16, 1);
-	lcd.print("ft/s");
+	lcd.print("m/s");
 //	lcd.setCursor(0, 3);
 //	lcd.print("Speed:");
 }
@@ -268,6 +264,8 @@ void displayMenu()
 // 7 will show up as 07
 void updateMenu()
 {
+  if(nopow)
+    return;
 	if(angle >= 0)
 	{
 		lcd.setCursor(0, 0);
@@ -277,8 +275,18 @@ void updateMenu()
   {
     lcd.setCursor(9, 0);
 	  lcd.print(String(pressure/10) + String(pressure%10));
-    lcd.setCursor(17, 0);
-    lcd.print(String((pressure/3)/10) + String((pressure/3)%10));
+    if(pressure < 5)
+    {
+      lcd.setCursor(15, 0);
+      lcd.print(" N/A ");
+    }
+    else
+    {
+      float velocity = 0.3182*pressure + 1.0126;
+      velocity = round(velocity*10.0)/10.0;
+      lcd.setCursor(15, 0);
+      lcd.print(String(velocity));
+    }
   }
 }
 
@@ -314,9 +322,11 @@ void handleCommand(char* command)
         pressure = -1;
         lcd.clear();
         lcd.print("No Power to Cannon");
+        nopow = 1;
         break;
       }
       pressure = (command[1] - 0x30)*10 + (command[2] - 0x30);
+      nopow = 0;
       updateMenu();
       break;
     }
